@@ -27,4 +27,11 @@ export namespace Types {
   export interface VoidSoQuery {
     soNumber: string;
   }
+
+  export interface SendEmailQuery {
+    email: string;
+    reportName: string;
+    reportTree: string;
+    reportParams: object[];
+  }
 }

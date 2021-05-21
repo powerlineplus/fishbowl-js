@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import * as net from 'net';
 import winston from 'winston';
+import axios from 'axios';
 import errorCodes from './errorCodes.json';
 import { Types } from './requestTypes';
 const csv = require('jquery-csv');
@@ -124,6 +125,11 @@ export = class Fishbowl {
     };
   }
 
+  public setSessionKey(key: any): void {
+    this.key = key;
+    this.loggedIn = true;
+  }
+
   /**
    * @param {RequestOptions} - holds the request type, options for that request, whether you want the info in JSON or CSV, and whether you want the response formatted nicely or the raw response
    * @returns {Promise}
@@ -145,153 +151,198 @@ export = class Fishbowl {
    * @param cb - (err: Error | null, res: JSON)
    */
   public sendRequest = ({ req, options, json = true, rawFishbowlResponse = false }: RequestOptions, cb?: (err: Error | null, res: any) => void): void => {
-    if (req === 'LoginRq' && this.loggedIn) {
-      return;
-    }
-
-    if (req === 'LogoutRq') {
-      this.loggedIn = false;
-    }
-
-    if (this.waiting) {
-      this.reqQueue.push({ req, options, json, rawFishbowlResponse, cb });
-      return;
-    }
-
-    let reqToFishbowl = '';
-    switch (req) {
-      case 'LoginRq': {
-        reqToFishbowl = this.loginRequest();
-        break;
-      }
-      case 'LogoutRq': {
-        reqToFishbowl = this.logoutRequest();
-        break;
-      }
-      case 'ExecuteQueryRq': {
-        reqToFishbowl = this.executeQueryRq(options);
-        break;
-      }
-      case 'ImportRq': {
-        reqToFishbowl = this.importRq(options);
-        break;
-      }
-      case 'ImportHeaderRq': {
-        reqToFishbowl = this.importHeaderRq(options);
-        break;
-      }
-      case 'IssueSORq': {
-        reqToFishbowl = this.issueSoRq(options);
-        break;
-      }
-      case 'QuickShipRq': {
-        reqToFishbowl = this.quickShipRq(options);
-        break;
-      }
-      case 'VoidSORq': {
-        reqToFishbowl = this.voidSoRq(options);
-        break;
-      }
-      default: {
-        reqToFishbowl = this.customRq(req, options);
-      }
-    }
-
-    this.waiting = true;
-    if (!this.connected) {
-      if (this.useLogger) {
-        this.logger.info('Not connected to server, connecting now...');
-      }
-
-      this.reqQueue.push({ req, options, json, rawFishbowlResponse, cb });
-      this.connectToFishbowl(true, cb);
-      return;
-    }
-
-    this.connection.once('done', (err, data) => {
-      if (err && cb !== undefined) {
-        cb(err, null);
-        this.deque();
+    if (!process.env.TUNNEL_FB) {
+      if (req === 'LoginRq' && this.loggedIn) {
         return;
       }
 
-      if (err) {
-        if (this.useLogger) {
-          this.logger.error(err);
-        }
+      if (req === 'LogoutRq') {
+        this.loggedIn = false;
+      }
 
-        this.deque();
+      if (this.waiting) {
+        this.reqQueue.push({ req, options, json, rawFishbowlResponse, cb });
         return;
       }
 
-      if (rawFishbowlResponse) {
-        // LoginRs will never be undefined if it is present
-        if (data.FbiJson.FbiMsgsRs['LoginRs'] !== undefined) {
-          this.loggedIn = true;
-          this.key = data.FbiJson.Ticket.Key;
-          this.userId = data.FbiJson.Ticket.UserID;
+      let reqToFishbowl = '';
+      switch (req) {
+        case 'LoginRq': {
+          reqToFishbowl = this.loginRequest();
+          break;
+        }
+        case 'LogoutRq': {
+          reqToFishbowl = this.logoutRequest();
+          break;
+        }
+        case 'ExecuteQueryRq': {
+          reqToFishbowl = this.executeQueryRq(options);
+          break;
+        }
+        case 'ImportRq': {
+          reqToFishbowl = this.importRq(options);
+          break;
+        }
+        case 'ImportListRq': {
+          reqToFishbowl = this.importListRq();
+          break;
+        }
+        case 'ImportHeaderRq': {
+          reqToFishbowl = this.importHeaderRq(options);
+          break;
+        }
+        case 'IssueSORq': {
+          reqToFishbowl = this.issueSoRq(options);
+          break;
+        }
+        case 'QuickShipRq': {
+          reqToFishbowl = this.quickShipRq(options);
+          break;
+        }
+        case 'VoidSORq': {
+          reqToFishbowl = this.voidSoRq(options);
+          break;
+        }
+        case 'EmailReportRq': {
+          reqToFishbowl = this.sendEmail(options);
+          break;
+        }
+        default: {
+          reqToFishbowl = this.customRq(req, options);
+        }
+      }
+
+      this.waiting = true;
+      if (!this.connected) {
+        if (this.useLogger) {
+          this.logger.info('Not connected to server, connecting now...');
         }
 
-        if (cb !== undefined) {
-          cb(null, data);
-        }
-
-        this.deque();
+        this.reqQueue.push({ req, options, json, rawFishbowlResponse, cb });
+        this.connectToFishbowl(true, cb);
         return;
       }
 
-      // There is always a statusCode and some sort of response object from Fishbowl.
-      // Don't worry about undefined
-      const fbData = Object.keys(data.FbiJson.FbiMsgsRs).find(key => key !== 'statusCode')!;
-      if (data.FbiJson.FbiMsgsRs.statusCode !== 1000) {
-        const fbError: Error = {
-          code: data.FbiJson.FbiMsgsRs.statusCode,
-          message: data.FbiJson.FbiMsgsRs.statusMessage || this.errorCodes[data.FbiJson.FbiMsgsRs.statusCode]
-        };
-
-        if (this.useLogger) {
-          this.logger.error(fbError);
+      this.connection.once('done', (err, data) => {
+        if (err && cb !== undefined) {
+          cb(err, null);
+          this.deque();
+          return;
         }
 
-        if (cb !== undefined) {
-          cb(fbError, null);
-        }
-      } else if (data.FbiJson.FbiMsgsRs[fbData].statusCode !== 1000) {
-        const fbError: Error = {
-          code: data.FbiJson.FbiMsgsRs[fbData].statusCode,
-          message: data.FbiJson.FbiMsgsRs[fbData].statusMessage || this.errorCodes[data.FbiJson.FbiMsgsRs[fbData].statusCode]
-        };
+        if (err) {
+          if (this.useLogger) {
+            this.logger.error(err);
+          }
 
-        if (this.useLogger) {
-          this.logger.error(fbError);
+          this.deque();
+          return;
         }
 
-        if (cb !== undefined) {
-          cb(fbError, null);
+        if (rawFishbowlResponse) {
+          // LoginRs will never be undefined if it is present
+          if (data.FbiJson.FbiMsgsRs['LoginRs'] !== undefined) {
+            this.loggedIn = true;
+            this.key = data.FbiJson.Ticket.Key;
+            this.userId = data.FbiJson.Ticket.UserID;
+          }
+
+          if (cb !== undefined) {
+            cb(null, data);
+          }
+
+          this.deque();
+          return;
         }
+
+        // There is always a statusCode and some sort of response object from Fishbowl.
+        // Don't worry about undefined
+        const fbData = Object.keys(data.FbiJson.FbiMsgsRs).find(key => key !== 'statusCode')!;
+        if (data.FbiJson.FbiMsgsRs.statusCode !== 1000) {
+          const fbError: Error = {
+            code: data.FbiJson.FbiMsgsRs.statusCode,
+            message: data.FbiJson.FbiMsgsRs.statusMessage || this.errorCodes[data.FbiJson.FbiMsgsRs.statusCode]
+          };
+
+          if (this.useLogger) {
+            this.logger.error(fbError);
+          }
+
+          if (cb !== undefined) {
+            cb(fbError, null);
+          }
+        } else if (data.FbiJson.FbiMsgsRs[fbData].statusCode !== 1000) {
+          const fbError: Error = {
+            code: data.FbiJson.FbiMsgsRs[fbData].statusCode,
+            message: data.FbiJson.FbiMsgsRs[fbData].statusMessage || this.errorCodes[data.FbiJson.FbiMsgsRs[fbData].statusCode]
+          };
+
+          if (this.useLogger) {
+            this.logger.error(fbError);
+          }
+
+          if (cb !== undefined) {
+            cb(fbError, null);
+          }
+        } else {
+          if (fbData === 'LoginRs') {
+            this.loggedIn = true;
+            this.key = data.FbiJson.Ticket.Key;
+            this.userId = data.FbiJson.Ticket.UserID;
+          } else if (fbData === 'ExecuteQueryRs' && json) {
+            data = this.parseExecuteQueryRqToJson(data);
+          } else if (fbData === 'ImportHeaderRs' && json) {
+            data = this.parseImportHeaderRqToJson(data);
+          }
+
+          if (cb !== undefined) {
+            cb(null, data.FbiJson.FbiMsgsRs[fbData]);
+          }
+        }
+
+        this.deque();
+      });
+
+      const reqLength = Buffer.alloc(4);
+      reqLength.writeIntBE(Buffer.byteLength(reqToFishbowl, 'utf8'), 0, 4);
+      this.connection.write(reqLength);
+      this.connection.write(reqToFishbowl);
+    } else {
+      console.log(`Fishbowl OVERRIDE, tunneling ${req}`);
+      if (req != 'LoginRq' && req != 'LogoutRq') {
+        axios({
+          method: 'post',
+          url: `${process.env.TUNNEL_FB_ADDR}/fishbowl/request/${req}`,
+          data: {
+            options: options
+          }
+        })
+          .then(response => {
+            if (cb != undefined) {
+              if (response.data.error) {
+                cb(response.data.error, null);
+              } else {
+                cb(null, response.data);
+              }
+            }
+          })
+          .catch(e => {
+            console.log(`Error tunneling req to FB...`);
+            if (cb != undefined) {
+              cb(e, null);
+            }
+          });
       } else {
-        if (fbData === 'LoginRs') {
-          this.loggedIn = true;
-          this.key = data.FbiJson.Ticket.Key;
-          this.userId = data.FbiJson.Ticket.UserID;
-        } else if (fbData === 'ExecuteQueryRs' && json) {
-          data = this.parseExecuteQueryRqToJson(data);
-        } else if (fbData === 'ImportHeaderRs' && json) {
-          data = this.parseImportHeaderRqToJson(data);
-        }
-
-        if (cb !== undefined) {
-          cb(null, data.FbiJson.FbiMsgsRs[fbData]);
+        if (cb != undefined) {
+          if (req == 'LoginRq') {
+            cb(null, { statusCode: 1000 });
+          }
+          if (req == 'LogoutRq') {
+            cb({ code: 1164, message: 'Logged out' }, null);
+          }
         }
       }
-
-      this.deque();
-    });
-
-    const reqLength = Buffer.alloc(4);
-    reqLength.writeIntBE(Buffer.byteLength(reqToFishbowl, 'utf8'), 0, 4);
-    this.connection.write(reqLength);
-    this.connection.write(reqToFishbowl);
+    }
   };
 
   /**
@@ -514,6 +565,19 @@ export = class Fishbowl {
     });
   };
 
+  private importListRq = (): string => {
+    return JSON.stringify({
+      FbiJson: {
+        Ticket: {
+          Key: this.key
+        },
+        FbiMsgsRq: {
+          ImportListRq: ''
+        }
+      }
+    });
+  };
+
   private importHeaderRq = (options: Types.ImportHeaderQuery): string => {
     return JSON.stringify({
       FbiJson: {
@@ -585,6 +649,26 @@ export = class Fishbowl {
         },
         FbiMsgsRq: {
           [req]: options
+        }
+      }
+    });
+  };
+
+  private sendEmail = (options: Types.SendEmailQuery) => {
+    return JSON.stringify({
+      FbiJson: {
+        Ticket: {
+          Key: this.key
+        },
+        FbiMsgsRq: {
+          EmailReportRq: {
+            ReportName: options.reportName,
+            ReportTree: options.reportTree,
+            Email: options.email,
+            ParameterList: {
+              ReportParam: options.reportParams
+            }
+          }
         }
       }
     });
